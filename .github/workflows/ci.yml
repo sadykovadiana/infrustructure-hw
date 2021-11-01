@@ -1,0 +1,188 @@
+name: CI
+
+on: push
+
+env:
+  REGISTRY: sadykovadiana
+  IMAGE_NAME: demo-app
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      newTaskId: ${{ steps.createdTask.outputs.id }}
+      updatedTaskId: ${{ steps.updatedTask.outputs.id }}
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: Set up variables
+        id: vars
+        run: |
+          echo ::set-output name=tag::${GITHUB_REF#refs/*/}
+          echo "::set-output name=sha_short::$(git rev-parse --short HEAD)"
+          echo "::set-output name=sha_long::$(git rev-parse HEAD)"
+          echo "::set-output name=datetime::$(date +'%Y-%m-%d %T')"
+          echo "::set-output name=ref::${{ github.ref }}"
+          echo "::set-output name=commit_msg::${{ github.event.head_commit.message }}"
+          echo "::set-output name=author::${{ github.actor }}"
+          echo "::set-output name=currentTag::$(git describe --tags --abbrev=0)"
+          echo "::set-output name=previousTag::$(git tag --sort=-creatordate | sed -n 2p)"
+
+      - name: Changelog
+        id: Changelog
+        uses: metcalfc/changelog-generator@v1.0.0
+        with:
+          myToken: ${{ secrets.GITHUB_TOKEN }}
+          head-ref: ${{ steps.vars.outputs.currentTag }}
+          base-ref: ${{ steps.vars.outputs.previousTag }}
+
+      - name: Create Release Task
+        id: createRequest
+        env:
+          POST_DESC: "Release version : ${{ steps.vars.outputs.tag }}\nLast commit : ${{ steps.vars.outputs.sha_short}}\nAuthor: ${{ steps.vars.outputs.author }}\nDate: ${{ steps.vars.outputs.datetime }}\n\n${{ steps.Changelog.outputs.changelog }}"
+        if: startsWith(github.ref, 'refs/tags')
+        uses: fjogeleit/http-request-action@master
+        with:
+          url: "https://api.tracker.yandex.net/v2/issues/"
+          method: "POST"
+          customHeaders: '{"Authorization": "OAuth ${{ secrets.OAuth }}", "OrgId": "${{ secrets.OrgId }}"}'
+          data: '{"summary": "Release task ${{ steps.vars.outputs.tag }}", "queue": "TMP", "description": ${{ toJson(env.POST_DESC) }} }'
+
+      - name: Get created task ID
+        id: createdTask
+        run: |
+          echo ${{ toJson(steps.createRequest.outputs.response) }} > config.json
+          echo "::set-output name=id::$(jq -r '.id' config.json)"
+
+      - name: Update Release Task
+        if: startsWith(github.ref, 'refs/heads')
+        id: updateRequest
+        uses: fjogeleit/http-request-action@master
+        with:
+          url: "https://api.tracker.yandex.net/v2/issues/_search"
+          method: "POST"
+          customHeaders: '{"Authorization": "OAuth ${{ secrets.OAuth }}", "OrgId": "${{ secrets.OrgId }}"}'
+          data: '{"filter": { "summary": "Release task ${{ steps.vars.outputs.currentTag }}" , "createdBy" : "1475458463" }}'
+
+      - name: Get updated task ID
+        if: startsWith(github.ref, 'refs/heads')
+        id: updatedTask
+        run: |
+          echo ${{ toJson(steps.updateRequest.outputs.response) }} > config.json
+          echo "::set-output name=id::$(jq -r '.[0].id' config.json)"
+
+      - name: Add comment
+        if: startsWith(github.ref, 'refs/heads')
+        uses: fjogeleit/http-request-action@master
+        with:
+          url: "https://api.tracker.yandex.net/v2/issues/${{ steps.updatedTask.outputs.id }}/comments"
+          method: "POST"
+          customHeaders: '{"Authorization": "OAuth ${{ secrets.OAuth }}", "OrgId": "${{ secrets.OrgId }}"}'
+          data: '{"text": "Commit ${{ steps.vars.outputs.sha_short }} ${{ steps.vars.outputs.commit_msg }} by ${{ steps.vars.outputs.author  }}"}'
+
+  buildDockerImage:
+    runs-on: ubuntu-latest
+    needs: release
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Log into DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD}}
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v3
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Get current task ID
+        id: taskDocker
+        run: |
+          newTaskId="${{needs.release.outputs.newTaskId}}"
+          if [ ${#newTaskId} -ge 5 ]
+          then
+            id="${{needs.release.outputs.newTaskId}}"
+          else
+            id="${{needs.release.outputs.updatedTaskId}}"
+          fi
+          echo "::set-output name=id::$id"
+
+      - name: Build and push Docker image
+        id: docker_build
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Write Docker comment in task
+        uses: fjogeleit/http-request-action@master
+        with:
+          url: "https://api.tracker.yandex.net/v2/issues/${{ steps.taskDocker.outputs.id }}/comments"
+          method: "POST"
+          customHeaders: '{"Authorization": "OAuth ${{ secrets.OAuth }}", "OrgId": "${{ secrets.OrgId }}"}'
+          data: '{"text": "Был собран Docker образ ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"}'
+
+  unitTesting:
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Setup node
+        uses: actions/setup-node@v2
+        with:
+          node-version: "14"
+
+      - name: Get current task id
+        id: taskId
+        run: |
+          updatedTaskId="${{needs.release.outputs.updatedTaskId}}"
+          if [ ${#updatedTaskId} -ge 5 ]
+          then
+            id="${{needs.release.outputs.updatedTaskId}}"
+          else
+            id="${{needs.release.outputs.newTaskId}}"
+          fi
+          echo "::set-output name=id::$id"
+
+      - name: npm run
+        run: |
+          npm install
+          npm test
+
+      - name: Publish a success comment
+        if: success()
+        uses: fjogeleit/http-request-action@master
+        with:
+          url: "https://api.tracker.yandex.net/v2/issues/${{ steps.taskId.outputs.id }}/comments"
+          method: "POST"
+          customHeaders: '{"Authorization": "OAuth ${{ secrets.OAuth }}", "OrgId": "${{ secrets.OrgId }}"}'
+          data: '{"text": "Тестирование релиза прошло успешно"}'
+
+      - name: Publish failure comment
+        if: failure()
+        uses: fjogeleit/http-request-action@master
+        with:
+          url: "https://api.tracker.yandex.net/v2/issues/${{ steps.taskId.outputs.id }}/comments"
+          method: "POST"
+          customHeaders: '{"Authorization": "OAuth ${{ secrets.OAuth }}", "OrgId": "${{ secrets.OrgId }}"}'
+          data: '{"text": "При тестировании релиза были выявлены ошибки"}'
