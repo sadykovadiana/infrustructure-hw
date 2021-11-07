@@ -3,6 +3,7 @@ import { cn } from '@bem-react/classname';
 import { CheckoutFormData } from '../../common/types';
 
 const PHONE_REGEX = /\(?([0-9]{3})\)?([ .-]?)([0-9]{3})\2([0-9]{4})/;
+const testString = "added test";
 
 export interface FormProps {
     onSubmit: (data: CheckoutFormData) => void;
