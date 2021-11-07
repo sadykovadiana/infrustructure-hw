@@ -18,7 +18,7 @@ export class ExampleApi {
         return await axios.post<CheckoutResponse>(`${this.basename}/api/checkout`, { form, cart });
     }
 }
-
+const test = 'test';
 export const LOCAL_STORAGE_CART_KEY = 'example-store-cart';
 
 export class CartApi {
