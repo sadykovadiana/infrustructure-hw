@@ -1,5 +1,6 @@
 import React from 'react';
 import { cn } from '@bem-react/classname';
+const testImage = "img.png";
 
 export interface ImageProps {
     className?: string;
